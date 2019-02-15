@@ -29,6 +29,7 @@ java.util.List,
 java.util.Iterator,
 java.util.Enumeration,
 java.util.HashMap,
+java.util.Base64,
 java.text.SimpleDateFormat" %>
 
 <!-- ----------------------------------------------------------
@@ -129,7 +130,7 @@ java.text.SimpleDateFormat" %>
     }
 
     //proxy sends the actual request to the server
-    private HttpURLConnection forwardToServer(HttpServletRequest request, String uri, byte[] postBody) throws IOException{
+    private HttpURLConnection forwardToServer(HttpServletRequest request, String uri, byte[] postBody, String credentials) throws IOException{
         //copy the client's request header to the proxy's request
         Enumeration headerNames = request.getHeaderNames();
         HashMap<String, String> mapHeaderInfo = new HashMap<>();
@@ -141,8 +142,8 @@ java.text.SimpleDateFormat" %>
 
         return
                 postBody.length > 0 ?
-                        doHTTPRequest(uri, postBody, "POST", mapHeaderInfo) :
-                        doHTTPRequest(uri, request.getMethod());
+                        doHTTPRequest(uri, postBody, "POST", mapHeaderInfo, credentials) :
+                        doHTTPRequest(uri, request.getMethod(), credentials);
     }
 
     //proxy gets the response back from server
@@ -157,7 +158,6 @@ java.text.SimpleDateFormat" %>
                 if (headerFieldKey != null && headerFieldKey.toLowerCase().equals("accept-ranges")){
                     continue;
                 }
-
                 List<String> headerFieldValue = headerFields.get(headerFieldKey);
                 StringBuilder sb = new StringBuilder();
                 for (String value : headerFieldValue) {
@@ -177,7 +177,6 @@ java.text.SimpleDateFormat" %>
             }else{
                 byteStream = con.getInputStream();
             }
-
             clientResponse.setStatus(con.getResponseCode());
 
             ByteArrayOutputStream buffer = new ByteArrayOutputStream();
@@ -189,14 +188,12 @@ java.text.SimpleDateFormat" %>
                 buffer.write(bytes, 0, bytesRead);
             }
             buffer.flush();
-
             //if the content of the HttpURLConnection contains error message, it means the token expired, so let proxy try again
             String strResponse = buffer.toString();
             if (!ignoreAuthenticationErrors && strResponse.contains("error") && (strResponse.contains("\"code\": 498") || strResponse.contains("\"code\": 499")
                     || strResponse.contains("\"code\":498") || strResponse.contains("\"code\":499"))) {
                 return true;
             }
-
             byte[] byteResponse = buffer.toByteArray();
             OutputStream ostream = clientResponse.getOutputStream();
             ostream.write(byteResponse);
@@ -216,8 +213,8 @@ java.text.SimpleDateFormat" %>
         }
         return true;
     }
-
-    //simplified interface of doHTTPRequest, will eventually call the complete interface of doHTTPRequest
+	
+	//simplified interface of doHTTPRequest, will eventually call the complete interface of doHTTPRequest
     private HttpURLConnection doHTTPRequest(String uri, String method) throws IOException{
         //build the bytes sent to server
         byte[] bytes = null;
@@ -236,18 +233,43 @@ java.text.SimpleDateFormat" %>
                 bytes = queryString.getBytes("UTF-8");
             }
         }
-        return doHTTPRequest(uri, bytes, method, headerInfo);
+        return doHTTPRequest(uri, bytes, method, headerInfo, "");
+    }
+
+    //simplified interface of doHTTPRequest, will eventually call the complete interface of doHTTPRequest
+    private HttpURLConnection doHTTPRequest(String uri, String method, String credentials) throws IOException{
+        //build the bytes sent to server
+        byte[] bytes = null;
+
+        //build the header sent to server
+        HashMap<String, String> headerInfo=new HashMap<>();
+        headerInfo.put("Referer", PROXY_REFERER);
+        if (method.equals("POST")){
+            String[] uriArray = uri.split("\\?", 2);
+            uri = uriArray[0];
+
+            headerInfo.put("Content-Type", "application/x-www-form-urlencoded");
+
+            if (uriArray.length > 1){
+                String queryString = uriArray[1];
+                bytes = queryString.getBytes("UTF-8");
+            }
+        }
+        return doHTTPRequest(uri, bytes, method, headerInfo, credentials);
     }
 
     //complete interface of doHTTPRequest
-    private HttpURLConnection doHTTPRequest(String uri, byte[] bytes, String method, Map mapHeaderInfo) throws IOException{
+    private HttpURLConnection doHTTPRequest(String uri, byte[] bytes, String method, Map mapHeaderInfo, String credentials) throws IOException{
         URL url = new URL(uri);
         HttpURLConnection con = (HttpURLConnection)url.openConnection();
 
         con.setConnectTimeout(5000);
         con.setReadTimeout(10000);
         con.setRequestMethod(method);
-
+		if (!credentials.isEmpty()){
+			mapHeaderInfo.put("Authorization", credentials);
+		}
+		
         //pass the header to the proxy's request
         passHeadersInfo(mapHeaderInfo, con);
 
@@ -682,8 +704,9 @@ java.text.SimpleDateFormat" %>
                                     String rateLimitPeriod = ProxyConfig.getAttributeWithRegex("rateLimitPeriod", server);
                                     String tokenServiceUri = ProxyConfig.getAttributeWithRegex("tokenServiceUri", server);
                                     String hostRedirect = ProxyConfig.getAttributeWithRegex("hostRedirect", server);
+									String httpBasicAuth = ProxyConfig.getAttributeWithRegex("httpBasicAuth", server);
 
-                                    serverList.add(new ServerUrl(url, matchAll, oauth2Endpoint, username, password, clientId, clientSecret, rateLimit, rateLimitPeriod, tokenServiceUri, hostRedirect));
+                                    serverList.add(new ServerUrl(url, matchAll, oauth2Endpoint, username, password, clientId, clientSecret, rateLimit, rateLimitPeriod, tokenServiceUri, hostRedirect, httpBasicAuth));
                                 }
 
                                 config.setServerUrls(serverList.toArray(new ServerUrl[serverList.size()]));
@@ -824,9 +847,10 @@ java.text.SimpleDateFormat" %>
         String rateLimitPeriod;
         String tokenServiceUri;
         String hostRedirect;
+		boolean httpBasicAuth;
 
         public ServerUrl(String url, String matchAll, String oauth2Endpoint, String username, String password, String clientId, String clientSecret, String rateLimit,
-                         String rateLimitPeriod, String tokenServiceUri, String hostRedirect){
+                         String rateLimitPeriod, String tokenServiceUri, String hostRedirect, String httpBasicAuth){
 
             this.url = url;
             this.matchAll = matchAll == null || matchAll.isEmpty() || Boolean.parseBoolean(matchAll);
@@ -839,7 +863,8 @@ java.text.SimpleDateFormat" %>
             this.rateLimitPeriod = rateLimitPeriod;
             this.tokenServiceUri = tokenServiceUri;
             this.hostRedirect = hostRedirect;
-
+			this.httpBasicAuth = httpBasicAuth != null && !httpBasicAuth.isEmpty() && Boolean.parseBoolean(httpBasicAuth);
+			
         }
 
         public ServerUrl(String url){
@@ -931,6 +956,13 @@ java.text.SimpleDateFormat" %>
 
             tokenServiceMap.put(this.url, value);
         }
+		
+		public boolean getHttpBasicAuth(){
+			return this.httpBasicAuth;
+		}
+		public void setHttpBasicAuth(boolean value){
+			this.httpBasicAuth = value;
+		}
     }
 
     private static Object _rateMapLock = new Object();
@@ -1104,29 +1136,37 @@ java.text.SimpleDateFormat" %>
         String post = new String(postBody);
         //check if the originalUri needs to be host-redirected
         String requestUri = uriHostRedirect(originalUri, serverUrl);
-
-        //if token comes with client request, it takes precedence over token or credentials stored in configuration
-        boolean hasClientToken = requestUri.contains("?token=") || requestUri.contains("&token=") || post.contains("?token=") || post.contains("&token=");
-        String token = "";
-        if (!hasClientToken) {
-            // Get new token and append to the request.
-            // But first, look up in the application scope, maybe it's already there:
-            token = (String)application.getAttribute("token_for_" + serverUrl.getUrl());
-            boolean tokenIsInApplicationScope = token != null && !token.isEmpty();
-
-            //if still no token, let's see if there are credentials stored in configuration which we can use to obtain new token
-            if (!tokenIsInApplicationScope){
-                token = getNewTokenIfCredentialsAreSpecified(serverUrl, requestUri);
-            }
-
-            if (token != null && !token.isEmpty() && !tokenIsInApplicationScope) {
-                //storing the token in Application scope, to do not waste time on requesting new one until it expires or the app is restarted.
-                application.setAttribute("token_for_" + serverUrl.getUrl(), token);
-            }
-        }
+		String token = "";
+		String credentials = "";
+		boolean hasClientToken = false;
+		if (serverUrl.getHttpBasicAuth()) {
+			if ((serverUrl.getUsername() != null && !serverUrl.getUsername().isEmpty()) && (serverUrl.getPassword() != null && !serverUrl.getPassword().isEmpty())) {
+				credentials = "Basic " + Base64.getEncoder().encodeToString((serverUrl.getUsername() + ":" + serverUrl.getPassword()).getBytes("UTF-8"));
+			}
+		} else {
+			//if token comes with client request, it takes precedence over token or credentials stored in configuration
+			hasClientToken = requestUri.contains("?token=") || requestUri.contains("&token=") || post.contains("?token=") || post.contains("&token=");
+			
+			if (!hasClientToken) {
+				// Get new token and append to the request.
+				// But first, look up in the application scope, maybe it's already there:
+				token = (String)application.getAttribute("token_for_" + serverUrl.getUrl());
+				boolean tokenIsInApplicationScope = token != null && !token.isEmpty();
+		
+				//if still no token, let's see if there are credentials stored in configuration which we can use to obtain new token
+				if (!tokenIsInApplicationScope){
+					token = getNewTokenIfCredentialsAreSpecified(serverUrl, requestUri);
+				}
+		
+				if (token != null && !token.isEmpty() && !tokenIsInApplicationScope) {
+					//storing the token in Application scope, to do not waste time on requesting new one until it expires or the app is restarted.
+					application.setAttribute("token_for_" + serverUrl.getUrl(), token);
+				}
+			}
+		}
 
         //forwarding original request
-        HttpURLConnection con = forwardToServer(request, addTokenToUri(requestUri, token), postBody);
+        HttpURLConnection con = forwardToServer(request, addTokenToUri(requestUri, token), postBody, credentials);
 
         if ( token == null || token.isEmpty() || hasClientToken) {
             //if token is not required or provided by the client, just fetch the response as is:
@@ -1144,13 +1184,12 @@ java.text.SimpleDateFormat" %>
                 //server returned error - potential cause: token has expired.
                 //we'll do second attempt to call the server with renewed token:
                 token = getNewTokenIfCredentialsAreSpecified(serverUrl, requestUri);
-                con = forwardToServer(request, addTokenToUri(requestUri, token), postBody);
+                con = forwardToServer(request, addTokenToUri(requestUri, token), postBody, credentials);
 
                 //storing the token in Application scope, to do not waste time on requesting new one until it expires or the app is restarted.
                 synchronized(this){
                     application.setAttribute("token_for_" + serverUrl.getUrl(), token);
                 }
-
                 fetchAndPassBackToClient(con, response, true);
             }
         }
